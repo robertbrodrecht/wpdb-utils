@@ -1,0 +1,801 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+
+args = { 'auto': False }
+
+for index, arg in enumerate( sys.argv ):
+	if arg == '--local' and sys.argv[ index+1 ][0:2] != "--":
+		args['local'] = sys.argv[ index+1 ]
+	if arg == '--remote' and sys.argv[ index+1 ][0:2] != "--":
+		args['remote'] = sys.argv[ index+1 ]
+	if arg == '--ssh-config' and sys.argv[ index+1 ][0:2] != "--":
+		args['ssh-config'] = sys.argv[ index+1 ]
+	if arg == '--ssh-host' and sys.argv[ index+1 ][0:2] != "--":
+		args['ssh-host'] = sys.argv[ index+1 ]
+	if arg == '--ssh-user' and sys.argv[ index+1 ][0:2] != "--":
+		args['ssh-user'] = sys.argv[ index+1 ]
+	if arg == '--ssh-port' and sys.argv[ index+1 ][0:2] != "--":
+		args['ssh-port'] = sys.argv[ index+1 ]
+	if arg == '--auto':
+		args['auto'] = True
+	if arg == '--help':
+		print( "" )
+		print( "A wizard for performing WordPress database migrations from remote to a local development environment." )
+		print( "" )
+		print( "Dependencies:" )
+		print( "" )
+		print( "• WP CLI on Local and Remote" )
+		print( "• WP CLI Find Command on Local and Remote" )
+		print( "• Python3 sshconf package" )
+		print( "" )
+		print( "Command Line Options:" )
+		print( "" )
+		print( "--local <path>" )
+		print( "	A path on your computer to search for WordPress installs. Default is ~/Sites/" )
+		print( "" )
+		print( "--remote <path>" )
+		print( "	A path on the remote computer to search for WordPress installs. If not specified, you will be asked." )
+		print( "" )
+		print( "--ssh-config <alias>" )
+		print( "	The alias for a host in your ~/.ssh/config. If not specified, you will be asked if any are available." )
+		print( "" )
+		print( "--ssh-host <host>" )
+		print( "	An SSH hostname. If not specified, you will be asked if it can’t be determined automatically. If --ssh-config specified, hostname from config will overide this value if present." )
+		print( "" )
+		print( "--ssh-user <username>" )
+		print( "	An SSH username. If not specified, you will be asked if it can’t be determined automatically. If --ssh-config specified, username from config will overide this value if present." )
+		print( "" )
+		print( "--ssh-port <port>" )
+		print( "	An SSH port. If not specified, you will be asked if it can’t be determined automatically. If --ssh-config specified, port from config will overide this value if present." )
+		print( "" )
+		print( "--auto" )
+		print( "	Automatically approve migration using standard search replacements." )
+		print( "" )
+		print( "--help" )
+		print( "	Show this information." )
+		print( "" )
+		quit()
+
+try:
+	from sshconf import read_ssh_config	
+except:
+	try:
+		print( "" )
+		print( "Attempting to install dependency: sshconf" )
+		subprocess.Popen(
+			[
+				"pip3",
+				"install",
+				"sshconf"
+			]
+		).wait()
+		from sshconf import read_ssh_config
+		print( "" )
+	except:
+		print( "" )
+		print( "Missing dependency. Run the following: pip3 install sshconf" )
+		quit()
+
+
+
+try:
+	wp_info_output = subprocess.check_output(
+		[
+			'wp',
+			'cli',
+			'info'
+		]
+	)
+except: 
+	print( "" )
+	print( "WP-CLI doesn't appear to be installed. Instructions are here: https://wp-cli.org" )
+	quit()
+
+
+wp_packages_output = subprocess.check_output(
+	[
+		'wp',
+		'package',
+		'list',
+		'--format=json'
+	]
+)
+
+wp_packages_json = wp_packages_output.decode("utf-8")
+wp_packages = json.loads( wp_packages_json )
+
+wp_has_find_command = False
+
+for wp_package in wp_packages:
+	if wp_package['name'] == "wp-cli/find-command":
+		wp_has_find_command = True
+
+if wp_has_find_command == False:
+	print( "" )
+	print( "Attempting to install WP-CLI dependency: wp-cli/find-command" )
+	wp_packages_output = subprocess.check_output(
+		[
+			'wp',
+			'package',
+			'install',
+			'wp-cli/find-command'
+		]
+	)
+	
+	wp_packages_output = subprocess.check_output(
+		[
+			'wp',
+			'package',
+			'list',
+			'--format=json'
+		]
+	)
+	
+	wp_packages_json = wp_packages_output.decode("utf-8")
+	wp_packages = json.loads( wp_packages_json )
+	
+	wp_has_find_command = False
+	
+	for wp_package in wp_packages:
+		if wp_package['name'] == "wp-cli/find-command":
+			wp_has_find_command = True
+	
+	if wp_has_find_command == False:
+		print( "Missing WP-CLI dependency. Run the following: wp package install wp-cli/find-command" )
+
+
+
+ssh_config = os.path.expanduser( "~/.ssh/config" )
+
+user_base_path = os.path.expanduser( "~/" )
+temp_dir = tempfile.gettempdir()
+
+wp_find_path = os.path.expanduser( "~/Sites/" )
+wp_find_depth = 4
+
+wp_local_install = -1
+wp_local_install_path = False
+
+cwd = os.getcwd()
+
+if "local" in args:
+	wp_find_path = os.path.expanduser( args["local"] )
+	cwd = wp_find_path
+
+print( "" )
+print( "" )
+print( "WordPress Database Migration" )
+print( "----------------------------" )
+print( "" )
+
+if os.path.exists( os.path.join( cwd, "wp-config.php" ) ) == False:
+	
+	wp_installs_output = subprocess.check_output(
+		[
+			"wp",
+			"find",
+			wp_find_path,
+			"--format=json",
+			"--max_depth=" + str( wp_find_depth ),
+			"--fields=wp_path"
+		],
+		stderr=subprocess.DEVNULL
+	)
+	wp_installs_json = wp_installs_output.decode("utf-8")
+	
+	if len( wp_installs_json ) < 1:
+		print( "No WordPress installs found in " + wp_find_path )
+		quit()
+	
+	wp_installs = json.loads( wp_installs_json )
+	
+	wp_installs = sorted( wp_installs, key=lambda k: k['wp_path'], reverse=False )
+	
+	print( "Local WordPress Installs:" )
+	print( "" )
+	
+	for wp_install_index, wp_install in enumerate( wp_installs ):
+		print(
+			str( wp_install_index+1 ) +
+			'. ' +
+			wp_install['wp_path'].replace( wp_find_path, "" )
+		)
+	
+	print( "" )
+	
+	attempts = 0
+	
+	while wp_local_install < 1 or wp_local_install > len( wp_installs ):
+		
+		if attempts > 5:
+			print( "" )
+			print( "Ok, try again later when you’re in the mood to cooperate." )
+			quit()
+		
+		if attempts > 4:
+			print( "" )
+			print( "Come on. You’re wasting my time here. Last chance." )
+			
+		wp_local_install = input( "Enter a number or q to quit: " )
+		
+		if wp_local_install.lower() == "q":
+			quit()
+		
+		if wp_local_install.isnumeric():
+			wp_local_install = int( wp_local_install )
+		else:
+			wp_local_install = -1
+			
+		attempts = attempts + 1;
+	
+	wp_local_install_path = wp_installs[ wp_local_install-1 ]['wp_path']
+	print( "" )
+	print( "" )
+else:
+	wp_local_install_path = cwd
+
+
+wp_db_prefix_output = subprocess.check_output(
+	[
+		"wp",
+		"config",
+		"get",
+		"table_prefix",
+		"--path=" + wp_local_install_path
+	],
+	stderr=subprocess.DEVNULL
+)
+wp_db_prefix = wp_db_prefix_output.decode("utf-8").strip()
+
+export_location = os.path.join(
+	temp_dir,
+	wp_db_prefix + str( int( time.time() ) ) + '.sql'
+)
+
+# Manual connection by default
+connection_type = -1
+connection_info = {}
+connection_string = ""
+connection_options = [ "Manual Connection" ]
+
+if os.path.exists( ssh_config ):
+	ssh_config_data = read_ssh_config( ssh_config )
+	ssh_config_hosts = sorted( ssh_config_data.hosts() )
+	
+	if 'ssh-config' in args:
+		check_host_param = ssh_config_data.host( args['ssh-config'] )
+		if len( check_host_param ) > 0:
+			connection_info = check_host_param
+			print( f"Using {args['ssh-config']} from SSH Config..." )
+			
+	
+	if len( connection_info ) < 1:
+		for host in ssh_config_hosts:
+			connection_options.append( host )
+		
+		connection_type = -1
+		while isinstance( connection_type, int ) == False or connection_type < 0 or connection_type > len( connection_options ):
+			print( "Server Connection Options:" )
+			print( "" )
+			
+			for index, host in enumerate( connection_options ):
+				print( str(index) + '. ' + host )
+			
+			print( "" )
+			connection_type = input( "Enter a number or q to quit: " )
+			
+			if connection_type.lower() == "q":
+				quit()
+			
+			connection_type = int( connection_type )
+			
+		if connection_type > 0:
+			connection_info = ssh_config_data.host( connection_options[ connection_type ] )
+
+print( "" )
+
+if connection_type == 0:
+	connection_info = {}
+
+if "user" in connection_info:
+	connection_string = connection_string + connection_info["user"] + "@"
+else:
+	if 'ssh-user' in args:
+		input_user = args['ssh-user']
+	else:
+		input_user = input( "SSH Username: " )
+		
+	connection_string = connection_string + input_user + "@"
+	
+if "hostname" in connection_info:
+	connection_string = connection_string + connection_info["hostname"]
+else:
+	input_host = ""
+	if 'ssh-host' in args:
+		input_host = args['ssh-host']
+	else:
+		if connection_type > 0:
+			input_host = input( "SSH Host (" + connection_options[ connection_type ] + "): " )
+			if input_host.strip() == "":
+				input_host = connection_options[ connection_type ]
+		else:
+			while input_host.strip() == "":
+				input_host = input( "SSH Host: " )
+		
+	connection_string = connection_string + input_host
+
+if "port" in connection_info:
+	input_port = connection_info["port"]
+	connection_string = connection_string + ":" + input_port
+else:
+	if 'ssh-port' in args:
+		input_port = args['ssh-port']
+	else:
+		input_port = input( "SSH Port (22): " )
+		if input_port == "":
+			input_port = "22"
+		connection_string = connection_string + ":" + input_port
+
+wp_packages_output = subprocess.check_output(
+	[
+		'wp',
+		'package',
+		'list',
+		'--format=json',
+		'--ssh=' + connection_string
+	]
+)
+
+wp_packages_json = wp_packages_output.decode("utf-8")
+wp_packages = json.loads( wp_packages_json )
+
+wp_has_find_command = False
+
+for wp_package in wp_packages:
+	if wp_package['name'] == "wp-cli/find-command":
+		wp_has_find_command = True
+
+if wp_has_find_command == False:
+	print( "" )
+	print( "Attempting to install WP-CLI dependency on remote server: wp-cli/find-command" )
+	wp_packages_output = subprocess.check_output(
+		[
+			'wp',
+			'package',
+			'install',
+			'wp-cli/find-command',
+			'--ssh=' + connection_string
+		]
+	)
+	
+	wp_packages_output = subprocess.check_output(
+		[
+			'wp',
+			'package',
+			'list',
+			'--format=json',
+			'--ssh=' + connection_string
+		]
+	)
+	
+	wp_packages_json = wp_packages_output.decode("utf-8")
+	wp_packages = json.loads( wp_packages_json )
+	
+	wp_has_find_command = False
+	
+	for wp_package in wp_packages:
+		if wp_package['name'] == "wp-cli/find-command":
+			wp_has_find_command = True
+	
+	if wp_has_find_command == False:
+		print( "Missing WP-CLI dependency on remote server. Run the following on the remote server: wp package install wp-cli/find-command" )
+
+
+wp_remote_install_path = False
+wp_remote_install = -1
+
+wp_cli_info_output = subprocess.check_output(
+	[
+		'wp',
+		'cli',
+		'info',
+		'--format=json',
+		'--ssh=' + connection_string
+	]
+)
+
+wp_cli_info_json = wp_cli_info_output.decode("utf-8")
+wp_cli_info = json.loads( wp_cli_info_json )
+
+remote_root = wp_cli_info['wp_cli_phar_path'] + "/"
+
+print( "" )
+print( "" )
+print( f"Remote Root Path: {remote_root}" )
+print( "" )
+print( "To find WordPress installs, do one of the following:" )
+print( "" )
+print( "• Enter a path relative to the remote root starting with ./ or ../" )
+print( "• Enter a full path starting with /" )
+print( "• Leave empty to search the remote root" )
+print( "" )
+
+wp_installs = False
+
+while wp_remote_install_path == False:
+	
+	if 'remote' in args and wp_installs == False:
+		input_path = args['remote']
+	else:
+		input_path = input( f"Where do you want to search ({remote_root}): " )
+		print( "" )
+	
+	search_path = remote_root
+	if input_path[0:1] == "/":
+		search_path = input_path
+	else:
+		search_path = remote_root + input_path
+	
+	print( f"Getting remote site list at {search_path}..." )
+	print( "" )
+	
+	remote_is_wordpress_install = False
+	
+	try:
+		wp_config_output = subprocess.check_output(
+			[
+				"wp",
+				"config",
+				"path",
+				'--ssh=' + connection_string + search_path
+			],
+			stderr=subprocess.DEVNULL
+		)
+		
+		if wp_config_output.decode("utf-8"):
+			remote_is_wordpress_install = True
+			print( "Specified path is a WordPress install." )
+	except:
+		remote_is_wordpress_install = False
+	
+	if remote_is_wordpress_install == False:
+		wp_installs_output = subprocess.check_output(
+			[
+				"wp",
+				"find",
+				".",
+				"--format=json",
+				"--max_depth=" + str( wp_find_depth ),
+				"--fields=wp_path",
+				'--ssh=' + connection_string + search_path
+			],
+			stderr=subprocess.DEVNULL
+		)
+		wp_installs_json = wp_installs_output.decode("utf-8")
+		wp_installs = json.loads( wp_installs_json )
+		
+		if len( wp_installs ) < 1:
+			print( f"No WordPress installs found at {search_path}." )
+			print( "" )
+		
+		else:
+			wp_installs = sorted( wp_installs, key=lambda k: k['wp_path'], reverse=False )
+			
+			print( "Remote WordPress Installs:" )
+			print( "" )
+			
+			for wp_install_index, wp_install in enumerate( wp_installs ):
+				print(
+					str( wp_install_index+1 ) +
+					'. ' +
+					wp_install['wp_path'].replace( remote_root, "" )
+				)
+			
+			print( "" )
+			
+			attempts = 0
+			wp_remote_install = -1
+			
+			while wp_remote_install > -2 and ( wp_remote_install < 1 or wp_remote_install > len( wp_installs ) ):
+				
+				if attempts > 5:
+					print( "" )
+					print( "Ok, try again later when you’re in the mood to cooperate." )
+					quit()
+				
+				if attempts > 4:
+					print( "" )
+					print( "Come on. You’re wasting my time here. Last chance." )
+					
+				wp_remote_install = input( "Enter a number, c to search a new location, or q to quit: " )
+				
+				if wp_remote_install.lower() == "q":
+					quit()
+				
+				if wp_remote_install.isnumeric():
+					wp_remote_install = int( wp_remote_install )
+				elif wp_remote_install.lower() == 'c':
+					print( "" )
+					print( "Restarting search." )
+					print( "" )
+					wp_remote_install = -2
+				else:
+					wp_remote_install = -1
+					
+				attempts = attempts + 1;
+				
+			if wp_remote_install > 0 and wp_remote_install <= len( wp_installs ):
+				wp_remote_install_path = wp_installs[ wp_remote_install-1 ]['wp_path']
+	else:
+		wp_remote_install_path = search_path
+
+print( "" )
+print( "" )
+print( "Gathering critical information..." )
+print( "" )
+
+
+local_table_prefix = subprocess.check_output(
+	[
+		'wp',
+		'config',
+		'get',
+		'table_prefix',
+		'--path=' + wp_local_install_path
+	]
+).decode("utf-8").strip()
+
+local_siteurl = subprocess.check_output(
+	[
+		'wp',
+		'option',
+		'get',
+		'siteurl',
+		'--path=' + wp_local_install_path
+	]
+).decode("utf-8").strip()
+
+local_home = subprocess.check_output(
+	[
+		'wp',
+		'option',
+		'get',
+		'home',
+		'--path=' + wp_local_install_path
+	]
+).decode("utf-8").strip()
+
+remote_table_prefix = subprocess.check_output(
+	[
+		'wp',
+		'config',
+		'get',
+		'table_prefix',
+		'--ssh=' + connection_string + wp_remote_install_path
+	]
+).decode("utf-8").strip()
+
+remote_siteurl = subprocess.check_output(
+	[
+		'wp',
+		'option',
+		'get',
+		'siteurl',
+		'--ssh=' + connection_string + wp_remote_install_path
+	]
+).decode("utf-8").strip()
+
+remote_home = subprocess.check_output(
+	[
+		'wp',
+		'option',
+		'get',
+		'home',
+		'--ssh=' + connection_string + wp_remote_install_path
+	]
+).decode("utf-8").strip()
+
+# print( "" )
+print( f"Exporting From Remote: {wp_remote_install_path}" )
+print( f"Importing To Local: {wp_local_install_path}" )
+
+
+if local_table_prefix != remote_table_prefix:
+	print( f"Change local prefix from {local_table_prefix} to {remote_table_prefix}" )
+print( "" )
+proceed = ""
+
+if args['auto'] == True:
+	proceed = "y"
+
+while proceed.lower() != "y" and proceed.lower() != "n":
+	proceed = input( "You good? Enter y or n: " )
+
+if proceed == "n":
+	print( "" )
+	print( "Ok, quitting" )
+	print( "" )
+	quit()
+	
+
+print( "" )
+print( "" )
+print( f"Backing up local database to: {export_location}" )
+
+wp_config_update_output = subprocess.check_output(
+	[
+		"wp",
+		"db",
+		"export",
+		export_location,
+		"--add-drop-table",
+		'--path=' + wp_local_install_path
+	],
+	stderr=subprocess.DEVNULL
+)
+
+	
+if local_table_prefix != remote_table_prefix:
+	local_table_prefix = subprocess.check_output(
+		[
+			'wp',
+			'config',
+			'set',
+			'table_prefix',
+			remote_table_prefix,
+			'--path=' + wp_local_install_path
+		]
+	).decode("utf-8").strip()
+	wp_config_update = wp_config_update_output.decode("utf-8")
+
+print( "" )
+print( f"Exporting database from {wp_remote_install_path}..." )
+
+wp_db_export_output = subprocess.Popen(
+	[
+		"wp",
+		"db",
+		"export",
+		"-",
+		"--add-drop-table",
+		'--ssh=' + connection_string + wp_remote_install_path
+	],
+	stderr=subprocess.DEVNULL,
+	stdout=subprocess.PIPE
+)
+# wp_db_export_output.wait()
+
+print( f"Importing database to {wp_local_install_path}..." )
+print( "" )
+
+wp_db_import_output = subprocess.check_output(
+	[
+		"wp",
+		"db",
+		"import",
+		"-",
+		'--path=' + wp_local_install_path
+	],
+	stderr=subprocess.DEVNULL,
+	stdin=wp_db_export_output.stdout
+)
+
+wp_db_import = wp_db_import_output.decode("utf-8")
+
+wp_cli_clear_cache = subprocess.check_output(
+	[
+		"wp",
+		"cli",
+		"cache",
+		"clear",
+		'--path=' + wp_local_install_path
+	],
+	stderr=subprocess.DEVNULL,
+	stdin=wp_db_export_output.stdout
+)
+
+if remote_siteurl != local_siteurl or remote_home != local_home:
+	print( "" )
+	print( "The following substitutions are common:" )
+	print( "" )
+	if remote_siteurl != local_siteurl:
+		print( f"• {remote_siteurl} to {local_siteurl}" )
+	if remote_home != local_home:
+		print( f"• {remote_home} to {local_home}" )
+	print( "" )
+
+replacements = -1
+
+if args['auto'] == True:
+	replacements = 4
+else:
+	print( "" )
+	print( "Your options are:" )
+	print( "" )
+	print( "1. Replace nothing and quit" )
+	print( "2. Enter manual replacements" )
+	if remote_siteurl != local_siteurl or remote_home != local_home:
+		print( "3. Automatically perform standard replacements, then enter manual replacements" )
+		print( "4. Only perform standard replacements" )
+	print( "" )
+
+while replacements > 4 or replacements < 1:
+	replacements = input( "Enter a number or q to quit: " )
+	if  replacements.lower() == "q":
+		quit()
+		
+	if replacements.isnumeric():
+		replacements = int( replacements )
+	else:
+		replacements = -1
+
+print( "" )
+
+if replacements == 3 or replacements == 4:
+	print( "" )
+	print( "Making standard replacements..." )
+	
+	remote_siteurl_replacement = subprocess.check_output(
+		[
+			'wp',
+			'search-replace',
+			remote_siteurl,
+			local_siteurl,
+			'--path=' + wp_local_install_path,
+			'--precise',
+			'--recurse-objects',
+			'--skip-tables=' + remote_table_prefix + 'users'
+		]
+	)
+	
+	remote_home_replacement = subprocess.check_output(
+		[
+			'wp',
+			'search-replace',
+			remote_home,
+			local_home,
+			'--path=' + wp_local_install_path,
+			'--precise',
+			'--recurse-objects',
+			'--skip-tables=' + remote_table_prefix + 'users'
+		]
+	)
+	
+if replacements == 2 or replacements == 3:
+	print( "" )
+	print( "Make your manual replacements." )
+	print( "Note: This will update all tables." )
+	
+	replace_from = ""
+	while replace_from.lower() != "q":
+		print( "" )
+		replace_from = input( "Find (q to quit): " )
+		if replace_from.lower() != "q":
+			replace_with = input( "Replace (c to cancel): " )
+			if replace_with.lower() != "c":
+				remote_home_replacement = subprocess.check_output(
+					[
+						'wp',
+						'search-replace',
+						replace_from,
+						replace_with,
+						'--path=' + wp_local_install_path,
+						'--precise',
+						'--recurse-objects'
+					]
+				)
+
+print( "" )
+print( "" )
+print( f"You’re all set at: {local_siteurl}" )
+print( "" )
+
+quit()
+
+
